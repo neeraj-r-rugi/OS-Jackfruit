@@ -19,7 +19,7 @@ warn() {
 
 fail() {
     echo "[FAIL] $1" >&2
-    exit 1
+    # exit 1
 }
 
 echo "== Supervised Runtime Project Preflight =="

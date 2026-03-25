@@ -21,6 +21,7 @@
 #include <linux/mutex.h>
 #include <linux/pid.h>
 #include <linux/sched/signal.h>
+#include <linux/hashtable.h>
 #include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/uaccess.h>

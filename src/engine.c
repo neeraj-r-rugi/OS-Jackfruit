@@ -142,7 +142,7 @@ static int parse_optional_flags(ipc_payload_client *req, int argc, char *argv[],
  * Supervisor Functions
  * -------------------------------------------------------------------------- */
 
-void sigint_handler_func(int signum) { supervisor_running = false; }
+void sigint_handler_func(int signum) { stop_signal_emmited = true; }
 
 void init_supervisor(const char *base_rootfs) {
   // Open a UNIX domain socket for communication with the CLI
@@ -170,7 +170,7 @@ void init_supervisor(const char *base_rootfs) {
 
   ipc_payload_client payload;
   struct sockaddr_un client_addr;
-  while (supervisor_running) {
+  while (atomic_load(&server_running)) {
     // Wait for commands from the CLI and handle them accordingly
     memset(&client_addr, 0, sizeof(client_addr));
     memset(&payload, 0, sizeof(payload));
@@ -179,15 +179,21 @@ void init_supervisor(const char *base_rootfs) {
                          (struct sockaddr *)&client_addr, &client_addr_len);
     if (bytes < 0) {
       if (errno == EINTR) {
-        continue; // Interrupted by signal, check supervisor_running and
-                  // continue
-      }
+		  if(stop_signal_emmited){
+			  atomic_store(&server_running, false);
+			}
+			continue; // Interrupted by signal, check supervisor_running and
+					  // continue
+		}
       PANIC("Failed to receive data from socket");
     }
     printf("Received command: %d for container ID: %s\n", payload.cmd,
            payload.id);
     sendto(unix_socket, "Command received", strlen("Command received"), 0,
            (struct sockaddr *)&client_addr, client_addr_len);
+	if(stop_signal_emmited){
+		atomic_store(&server_running, false);
+	}
   }
   unlink(SUPERVISOR_SOCKET_PATH);
 }
@@ -196,7 +202,7 @@ void init_supervisor(const char *base_rootfs) {
  * Client Functions
  * -------------------------------------------------------------------------- */
 
-int fire_command_payload(ipc_payload_client *payload) {
+static int fire_command_payload(ipc_payload_client *payload){
   size_t needed =
       snprintf(NULL, 0, "%s%d.sock", CONTROL_SOCKET_PATH_PREFIX, getpid()) + 1;
 
@@ -296,6 +302,38 @@ static void init_cmd_run(int argc, char *argv[]) {
   }
   fire_command_payload(&payload);
 }
+static void init_cmd_ps(void){
+  ipc_payload_client payload;
+  memset(&payload, 0, sizeof(payload));
+  payload.cmd = PS;
+  fire_command_payload(&payload);
+
+}
+static void init_cmd_logs(int argc, char * argv[]){
+  if (argc < 3) {
+      fprintf(stderr, "Usage: %s logs <id>\n", argv[0]);
+      errno = EINVAL;
+      PANIC_CLIENT("Not Enough Arguments");
+  }
+  ipc_payload_client payload;
+  memset(&payload, 0, sizeof(payload));
+  payload.cmd = LOGS;
+  strncpy(payload.id, argv[2], sizeof(payload.id) - 1);
+  fire_command_payload(&payload);
+}
+static void init_cmd_stop(int argc, char * argv[]){
+	if(argc < 3) {
+	  fprintf(stderr, "Usage: %s stop <id>\n", argv[0]);
+	  errno = EINVAL;
+	  PANIC_CLIENT("Not Enough Arguments");
+  }
+  ipc_payload_client payload;
+  memset(&payload, 0, sizeof(payload));
+  payload.cmd = STOP;
+  strncpy(payload.id, argv[2], sizeof(payload.id) - 1);
+  fire_command_payload(&payload);
+
+}
 /* --------------------------------------------------------------------------
  * Main Function
  * -------------------------------------------------------------------------- */
@@ -322,13 +360,13 @@ int main(int argc, char *argv[]) {
     init_cmd_run(argc, argv);
     break;
   case CLI_PS:
-    printf("PS\n");
+    init_cmd_ps();
     break;
   case CLI_LOGS:
-    printf("LOGS\n");
+    init_cmd_logs(argc, argv);
     break;
   case CLI_STOP:
-    printf("STOP\n");
+    init_cmd_stop(argc, argv);
     break;
   }
   return 0;

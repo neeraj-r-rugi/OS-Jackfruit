@@ -55,8 +55,9 @@ typedef struct{
     unsigned long int hard_mib; //in MiB
 }ipc_payload_client;
 
-//Global variables: Single Acssess Point, with no Synchronization needed, since only the supervisor's main thread will access it.
-volatile sig_atomic_t supervisor_running = true;
+//Global variables
+volatile sig_atomic_t stop_signal_emmited = false;
+_Atomic int server_running = true; //This will be set 
 
 
 #endif

@@ -18,9 +18,13 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <search.h>
+#include <sys/resource.h>
+#include "uthash.h"
 #include "defines.h"
 
 // File Specific Global Variables
+
 
 /* --------------------------------------------------------------------------
  * Helper Functions
@@ -143,59 +147,116 @@ static int parse_optional_flags(ipc_payload_client *req, int argc, char *argv[],
  * -------------------------------------------------------------------------- */
 
 void sigint_handler_func(int signum) { stop_signal_emmited = true; }
+void add_container_info(container_info *info){
+    pthread_mutex_lock(&containers_list_mutex);
+    HASH_ADD_STR(containers_list, id, info);
+    pthread_mutex_unlock(&containers_list_mutex);
+}
+
+int init_start(void *arg){
+    ipc_payload_client *payload = (ipc_payload_client *)arg;
+    printf("Initializing start command for container ID: %s\n", payload->id);
+    container_info * info = malloc(sizeof(container_info));
+    strcpy(info->id, payload->id);
+    strcpy(info->rootfs, payload->container_rootfs);\
+    info->host_pid = getpid();
+    info->exit_code = -1; //Default value indicating not exited
+    info->exit_signal = -1; //Default value indicating not exited by signal
+    info->soft_mib = payload->soft_mib;
+    info->hard_mib = payload->hard_mib;
+    info->state = RUNNING;
+    add_container_info(info);
+    sethostname(info->id, strlen(info->id));
+    if(mount(info->rootfs, info->rootfs, "bind", MS_BIND | MS_REC, NULL) < 0){
+        perror("Failed to bind mount rootfs");
+        return -1;
+    }
+    if(chroot(info->rootfs) < 0){
+        perror("Failed to chroot to rootfs");
+        return -1;
+    }
+    if(chdir("/") < 0){
+        perror("Failed to change directory to /");
+        return -1;
+    }
+    if(setpriority(PRIO_PROCESS, 0, payload->nice) < 0){
+        perror("Failed to set process priority");
+        return -1;
+    }
+    char *argv[] = { payload->prog, NULL };
+    execv(payload->prog, argv);
+    perror("Failed to exec command");
+    return -1;
+}
 
 void init_supervisor(const char *base_rootfs) {
-  // Open a UNIX domain socket for communication with the CLI
-  unlink(SUPERVISOR_SOCKET_PATH); // Ensure old socket is removed
-  int unix_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
-  if (bind(unix_socket,
-           (struct sockaddr *)&(struct sockaddr_un){
-               .sun_family = AF_UNIX, .sun_path = SUPERVISOR_SOCKET_PATH},
-           sizeof(struct sockaddr_un)) < 0) {
-    PANIC("Failed to bind UNIX socket");
-  }
 
-  // Register signal handlers for graceful shutdown
-  struct sigaction sigint_handler;
-  memset(&sigint_handler, 0, sizeof(sigint_handler));
-  sigint_handler.sa_handler =
-      sigint_handler_func; //! Uncomment this line to enable graceful shutdown
-                           //! on SIGINT and SIGTERM
-  sigemptyset(&sigint_handler.sa_mask);
-  sigint_handler.sa_flags = 0;
-  sigaction(SIGINT, &sigint_handler, NULL);
-  sigaction(SIGTERM, &sigint_handler, NULL);
-
-  printf("Supervisor initialized with base rootfs: %s\n", base_rootfs);
-
-  ipc_payload_client payload;
-  struct sockaddr_un client_addr;
-  while (atomic_load(&server_running)) {
-    // Wait for commands from the CLI and handle them accordingly
-    memset(&client_addr, 0, sizeof(client_addr));
-    memset(&payload, 0, sizeof(payload));
-    socklen_t client_addr_len = sizeof(client_addr);
-    int bytes = recvfrom(unix_socket, &payload, sizeof(payload), 0,
-                         (struct sockaddr *)&client_addr, &client_addr_len);
-    if (bytes < 0) {
-      if (errno == EINTR) {
-		  if(stop_signal_emmited){
-			  atomic_store(&server_running, false);
-			}
-			continue; // Interrupted by signal, check supervisor_running and
-					  // continue
-		}
-      PANIC("Failed to receive data from socket");
+    //Check if the base rootfs exists and is a directory
+    struct stat rootfs_st;
+    if (stat(base_rootfs, &rootfs_st) < 0) {
+        errno = ENOENT;
+        PANIC("Base rootfs does not exist");
+    }strncpy(BASE_ROOTFS, base_rootfs, sizeof(BASE_ROOTFS) - 1);
+    // Open a UNIX domain socket for communication with the CLI
+    unlink(SUPERVISOR_SOCKET_PATH); // Ensure old socket is removed
+    int unix_socket = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (bind(unix_socket,
+            (struct sockaddr *)&(struct sockaddr_un){
+                .sun_family = AF_UNIX, .sun_path = SUPERVISOR_SOCKET_PATH},
+            sizeof(struct sockaddr_un)) < 0) {
+        PANIC("Failed to bind UNIX socket");
     }
-    printf("Received command: %d for container ID: %s\n", payload.cmd,
-           payload.id);
-    sendto(unix_socket, "Command received", strlen("Command received"), 0,
-           (struct sockaddr *)&client_addr, client_addr_len);
-	if(stop_signal_emmited){
-		atomic_store(&server_running, false);
-	}
-  }
-  unlink(SUPERVISOR_SOCKET_PATH);
+
+    // Register signal handlers for graceful shutdown
+    struct sigaction sigint_handler;
+    memset(&sigint_handler, 0, sizeof(sigint_handler));
+    sigint_handler.sa_handler =
+        sigint_handler_func; //! Uncomment this line to enable graceful shutdown
+                            //! on SIGINT and SIGTERM
+    sigemptyset(&sigint_handler.sa_mask);
+    sigint_handler.sa_flags = 0;
+    sigaction(SIGINT, &sigint_handler, NULL);
+    sigaction(SIGTERM, &sigint_handler, NULL);
+
+    printf("Supervisor initialized with base rootfs: %s\n", base_rootfs);
+
+    ipc_payload_client payload;
+    struct sockaddr_un client_addr;
+    while (atomic_load(&server_running)) {
+        // Wait for commands from the CLI and handle them accordingly
+        memset(&client_addr, 0, sizeof(client_addr));
+        memset(&payload, 0, sizeof(payload));
+        socklen_t client_addr_len = sizeof(client_addr);
+        int bytes = recvfrom(unix_socket, &payload, sizeof(payload), 0,
+                            (struct sockaddr *)&client_addr, &client_addr_len);
+        if (bytes < 0) {
+        if (errno == EINTR) {
+            if(stop_signal_emmited){
+                atomic_store(&server_running, false);
+                }
+                continue; // Interrupted by signal, check supervisor_running and
+                        // continue
+            }
+        PANIC("Failed to receive data from socket");
+        }
+        printf("Received command: %d for container ID: %s\n", payload.cmd,
+            payload.id);
+        switch(payload.cmd){
+            case START:
+                pid_t child_pid = clone(&init_start, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
+                if(child_pid < 0){
+                    //Send Error response to client
+                }
+                break;
+            default:
+                break;
+
+        }
+        if(stop_signal_emmited){
+            atomic_store(&server_running, false);
+        }
+    }
+    unlink(SUPERVISOR_SOCKET_PATH);
 }
 
 /* --------------------------------------------------------------------------
@@ -271,6 +332,7 @@ static void init_cmd_start(int argc, char *argv[]) {
   strncpy(payload.id, argv[2], sizeof(payload.id) - 1);
   strncpy(payload.container_rootfs, argv[3],
           sizeof(payload.container_rootfs) - 1);
+   strncpy(payload.prog, argv[4], sizeof(payload.prog) - 1);
   payload.soft_mib = DEFAULT_SOFT_LIMIT;
   payload.hard_mib = DEFAULT_HARD_LIMIT;
   if (parse_optional_flags(&payload, argc, argv, 5) != 0) {

@@ -55,6 +55,7 @@ typedef struct{
     char prog[STRUCT_STR_LEN]; //Command to run for RUN command, not used for START command
     int nice;     //-20 to 19
     int slave_fd; //Used for redirecting container's stdout and stderr to CLI, not used for START command
+    int await_fd[2]; //Used for synchronizing between supervisor and child process during startup, not used for RUN command
     ipc_command_type cmd;
     unsigned long int soft_mib; //in MiB
     unsigned long int hard_mib; //in MiB

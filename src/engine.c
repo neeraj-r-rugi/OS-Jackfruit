@@ -143,6 +143,11 @@ static int parse_optional_flags(ipc_payload_client *req, int argc, char *argv[],
 
   return 0;
 }
+void write_file(char *path, char *data) {
+    int fd = open(path, O_WRONLY);
+    write(fd, data, strlen(data));
+    close(fd);
+}
 /* --------------------------------------------------------------------------
  * Supervisor Functions
  * -------------------------------------------------------------------------- */
@@ -190,8 +195,11 @@ int init_start(void *arg){
     return -1;
 }
 int init_run(void *arg){
-    setsid();
     ipc_payload_client *payload = (ipc_payload_client *)arg;
+    char _buf;
+    close(payload->await_fd[1]); //Close the write end of the pipe in the child, only the supervisor will write to it
+    read(payload->await_fd[0], &_buf, 1); //Wait for the supervisor to signal that it's ready for the child to proceed with execution
+    setsid();
     ioctl(payload->slave_fd, TIOCSCTTY, 0);
     dup2(payload->slave_fd, STDIN_FILENO);
     dup2(payload->slave_fd, STDOUT_FILENO);
@@ -224,7 +232,13 @@ int init_run(void *arg){
         perror("Failed to set process priority");
         return -1;
     }
-    char *argv[] = { payload->prog, NULL };
+    mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+    mount("proc", "/proc", "proc", 0, NULL);
+    mount("sysfs", "/sys", "sysfs", MS_RDONLY, NULL);
+    mount("tmpfs", "/dev", "tmpfs", 0, "mode=755");
+    mount("devpts", "/dev/pts", "devpts", 0, NULL);
+    mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
+        char *argv[] = { payload->prog, NULL };
     execv(payload->prog, argv);
     perror("Failed to exec command");
     return -1;
@@ -309,6 +323,8 @@ void init_supervisor(const char *base_rootfs) {
           payload.slave_fd = fd;
         }
         pid_t child_pid;
+        pipe(payload.await_fd); //Create a pipe for synchronizing between supervisor and child during startup
+        
         switch(payload.cmd){
             case START:
                 child_pid = clone(&init_start, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
@@ -322,8 +338,21 @@ void init_supervisor(const char *base_rootfs) {
                     //Send Error response to client
                     printf("Failed to clone child process for RUN command\n");
                 }
+                close(payload.await_fd[0]);
                 close(payload.slave_fd); //Close the slave fd in the supervisor after passing it to the child
                 printf("Cloned child process with PID: %d for RUN command\n", child_pid);
+                char path[100], map[100];
+                sprintf(path, "/proc/%d/setgroups", child_pid);
+                write_file(path, "deny");
+
+                sprintf(path, "/proc/%d/uid_map", child_pid);
+                sprintf(map, "0 %d 1", getuid());
+                write_file(path, map);
+
+                sprintf(path, "/proc/%d/gid_map", child_pid);
+                sprintf(map, "0 %d 1", getgid());
+                write_file(path, map);
+                write(payload.await_fd[1], "x", 1); //Signal the child that it can proceed with execution after setting up user namespace mappings
                 break;
             default:
                 break;
@@ -382,7 +411,6 @@ static int fire_command_payload(ipc_payload_client *payload){
     };
     char c_buffer[CMSG_SPACE(sizeof(int))];
 
-    // *** Add these two lines ***
     msg.msg_name    = &server_addr;           // destination: the supervisor
     msg.msg_namelen = server_addr_len;
 

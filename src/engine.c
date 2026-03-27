@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <search.h>
 #include <sys/resource.h>
+#include <pty.h>
 #include "uthash.h"
 #include "defines.h"
 
@@ -158,7 +159,7 @@ int init_start(void *arg){
     printf("Initializing start command for container ID: %s\n", payload->id);
     container_info * info = malloc(sizeof(container_info));
     strcpy(info->id, payload->id);
-    strcpy(info->rootfs, payload->container_rootfs);\
+    strcpy(info->rootfs, payload->container_rootfs);
     info->host_pid = getpid();
     info->exit_code = -1; //Default value indicating not exited
     info->exit_signal = -1; //Default value indicating not exited by signal
@@ -188,7 +189,46 @@ int init_start(void *arg){
     perror("Failed to exec command");
     return -1;
 }
-
+int init_run(void *arg){
+    setsid();
+    ipc_payload_client *payload = (ipc_payload_client *)arg;
+    ioctl(payload->slave_fd, TIOCSCTTY, 0);
+    dup2(payload->slave_fd, STDIN_FILENO);
+    dup2(payload->slave_fd, STDOUT_FILENO);
+    dup2(payload->slave_fd, STDERR_FILENO);
+    printf("Initializing start command for container ID: %s\n", payload->id);
+    container_info * info = malloc(sizeof(container_info));
+    strcpy(info->id, payload->id);
+    strcpy(info->rootfs, payload->container_rootfs);
+    info->host_pid = getpid();
+    info->exit_code = -1; //Default value indicating not exited
+    info->exit_signal = -1; //Default value indicating not exited by signal
+    info->soft_mib = payload->soft_mib;
+    info->hard_mib = payload->hard_mib;
+    info->state = RUNNING;
+    add_container_info(info);
+    sethostname(info->id, strlen(info->id));
+    if(mount(info->rootfs, info->rootfs, "bind", MS_BIND | MS_REC, NULL) < 0){
+        perror("Failed to bind mount rootfs");
+        return -1;
+    }
+    if(chroot(info->rootfs) < 0){
+        perror("Failed to chroot to rootfs");
+        return -1;
+    }
+    if(chdir("/") < 0){
+        perror("Failed to change directory to /");
+        return -1;
+    }
+    if(setpriority(PRIO_PROCESS, 0, payload->nice) < 0){
+        perror("Failed to set process priority");
+        return -1;
+    }
+    char *argv[] = { payload->prog, NULL };
+    execv(payload->prog, argv);
+    perror("Failed to exec command");
+    return -1;
+}
 void init_supervisor(const char *base_rootfs) {
 
     //Check if the base rootfs exists and is a directory
@@ -241,12 +281,49 @@ void init_supervisor(const char *base_rootfs) {
         }
         printf("Received command: %d for container ID: %s\n", payload.cmd,
             payload.id);
+        if(payload.cmd == RUN){
+          struct msghdr msg = {0};
+          char m_buffer[1] = {0};
+          struct iovec io = {
+              .iov_base = m_buffer,
+              .iov_len = sizeof(m_buffer)
+          };
+          char c_buffer[CMSG_SPACE(sizeof(int))];
+          msg.msg_iov = &io;
+          msg.msg_iovlen = 1;
+          msg.msg_control = c_buffer;
+          msg.msg_controllen = sizeof(c_buffer);
+          if (recvmsg(unix_socket, &msg, 0) < 0){
+            if (errno == EINTR) {
+                if(stop_signal_emmited){
+                    atomic_store(&server_running, false);
+                }
+                continue; // Interrupted by signal, check supervisor_running and
+                        // continue
+            }
+            PANIC("Failed to receive file descriptor");
+          }
+          struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+          int fd;
+          memcpy(&fd, CMSG_DATA(cmsg), sizeof(fd));
+          payload.slave_fd = fd;
+        }
+        pid_t child_pid;
         switch(payload.cmd){
             case START:
-                pid_t child_pid = clone(&init_start, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
+                child_pid = clone(&init_start, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
                 if(child_pid < 0){
                     //Send Error response to client
                 }
+                break;
+            case RUN:
+                child_pid = clone(&init_run, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
+                if(child_pid < 0){
+                    //Send Error response to client
+                    printf("Failed to clone child process for RUN command\n");
+                }
+                close(payload.slave_fd); //Close the slave fd in the supervisor after passing it to the child
+                printf("Cloned child process with PID: %d for RUN command\n", child_pid);
                 break;
             default:
                 break;
@@ -296,6 +373,37 @@ static int fire_command_payload(ipc_payload_client *payload){
     free(control_socket_path);
     PANIC_CLIENT("Failed to send data to supervisor");
   }
+  if(payload->cmd == RUN){
+    struct msghdr msg = {0};
+    char m_buffer[1] = {0};
+    struct iovec io = {
+        .iov_base = m_buffer,
+        .iov_len  = sizeof(m_buffer)
+    };
+    char c_buffer[CMSG_SPACE(sizeof(int))];
+
+    // *** Add these two lines ***
+    msg.msg_name    = &server_addr;           // destination: the supervisor
+    msg.msg_namelen = server_addr_len;
+
+    msg.msg_iov        = &io;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = c_buffer;
+    msg.msg_controllen = sizeof(c_buffer);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type  = SCM_RIGHTS;
+    cmsg->cmsg_len   = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &payload->slave_fd, sizeof(int));
+
+    if (sendmsg(unix_socket, &msg, 0) < 0) {
+        unlink(control_socket_path);
+        free(control_socket_path);
+        PANIC_CLIENT("Failed to send file descriptor to supervisor");
+    }
+    return 0; //For RUN command, we don't wait for a response from the supervisor
+  }
   char buffer[256];
   ssize_t bytes_received =
       recvfrom(unix_socket, buffer, sizeof(buffer), 0, NULL, NULL);
@@ -335,6 +443,7 @@ static void init_cmd_start(int argc, char *argv[]) {
    strncpy(payload.prog, argv[4], sizeof(payload.prog) - 1);
   payload.soft_mib = DEFAULT_SOFT_LIMIT;
   payload.hard_mib = DEFAULT_HARD_LIMIT;
+  payload.nice = 0; //Default nice value
   if (parse_optional_flags(&payload, argc, argv, 5) != 0) {
     errno = EINVAL;
     PANIC_CLIENT("Failed to parse optional flags for start command");
@@ -356,13 +465,44 @@ static void init_cmd_run(int argc, char *argv[]) {
   strncpy(payload.id, argv[2], sizeof(payload.id) - 1);
   strncpy(payload.container_rootfs, argv[3],
           sizeof(payload.container_rootfs) - 1);
+  strncpy(payload.prog, argv[4], sizeof(payload.prog) - 1);
   payload.soft_mib = DEFAULT_SOFT_LIMIT;
   payload.hard_mib = DEFAULT_HARD_LIMIT;
+  payload.nice = 0; //Default nice value
   if (parse_optional_flags(&payload, argc, argv, 5) != 0) {
     errno = EINVAL;
     PANIC_CLIENT("Failed to parse optional flags for start command");
   }
+  int master_fd, slave_fd;
+  openpty(&master_fd, &slave_fd, NULL, NULL, NULL);
+  payload.slave_fd = slave_fd;
   fire_command_payload(&payload);
+  close(slave_fd);
+  struct termios orig, raw;
+  tcgetattr(STDIN_FILENO, &orig);
+  raw = orig;
+  cfmakeraw(&raw);
+  tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+  fd_set fds;
+  char buf[256];
+  while (1) {
+      FD_ZERO(&fds);
+      FD_SET(STDIN_FILENO, &fds);
+      FD_SET(master_fd, &fds);
+      select(master_fd + 1, &fds, NULL, NULL, NULL);
+      if (FD_ISSET(STDIN_FILENO, &fds)) {
+          int n = read(STDIN_FILENO, buf, sizeof(buf));
+          if(n <= 0) break; // EOF or error
+          write(master_fd, buf, n);
+      }
+      if (FD_ISSET(master_fd, &fds)) {
+          int n = read(master_fd, buf, sizeof(buf));
+          if (n <= 0) break;   // EOF or error
+          write(STDOUT_FILENO, buf, n);
+      }
+  }
+  tcsetattr(STDIN_FILENO, TCSANOW, &orig);  // restore terminal to cooked mode
+  close(master_fd);
 }
 static void init_cmd_ps(void){
   ipc_payload_client payload;
@@ -411,6 +551,7 @@ int main(int argc, char *argv[]) {
       return 1;
     }
   }
+  printf("PID: %d\n", getpid());
   switch (parse_command(argv[1], argv[0])) {
   case CLI_SUPERVISOR:
     init_supervisor(argv[2]);

@@ -54,11 +54,18 @@ typedef enum{
 
 
 typedef enum{
+    FAILED,
     RUNNING,
     STOPPED,
     KILLED,
     EXITED
 }container_state;
+
+typedef enum{
+    ACK,
+    NACK,
+    FILE_LOC
+}supervisor_response_type;
 
 //STRUCTS
 typedef struct{
@@ -94,7 +101,7 @@ typedef struct container_info{
 
 typedef struct producer_thread_arg{
 
-    char container_id[STRUCT_STR_LEN];\
+    char container_id[STRUCT_STR_LEN];
     int producer_read_fd[2]; //Used for reading logs from the container process, supervisor will read from read_fd[0] and container process will write to read_fd[1]
     int pid;
 
@@ -116,16 +123,27 @@ typedef struct bounded_buffer_queue{
     pthread_cond_t not_empty;
 }bounded_buffer_queue;
 
+typedef struct supervisor_response{
+    supervisor_response_type type;
+    container_state state; //State of the Container.
+    char data[STRUCT_STR_LEN]; //This will be used for sending additional data for certain commands, like PS command response will send the container state, exit code and exit signal in this field.
+}supervisor_response;
+
 //Global variables
-volatile sig_atomic_t stop_signal_emmited = false;
-_Atomic int server_running = true; //This will be set 
-char child_stack[STACK_SIZE];
-int CHILD_FLAGS = CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWUSER | SIGCHLD; //Namespace flags for clone
-char BASE_ROOTFS[STRUCT_STR_LEN]; //This will be set by supervisor command line argument
-struct container_info * containers_list = NULL; //Hash table to store container info, keyed by container ID
+extern volatile sig_atomic_t stop_signal_emmited;
+extern _Atomic int server_running;
+extern char child_stack[STACK_SIZE];
+extern int CHILD_FLAGS;
+extern char BASE_ROOTFS[STRUCT_STR_LEN]; 
+extern struct container_info * containers_list;
+extern bounded_buffer_queue logs_queue;
+
 
 //Locks
-pthread_mutex_t containers_list_mutex = PTHREAD_MUTEX_INITIALIZER; //Mutex to protect access to the containers hash table
+extern pthread_mutex_t containers_list_mutex; //Mutex to protect access to the containers hash table
+
+//Semaphores
+extern _Atomic int producer_count;
 
 
 #endif

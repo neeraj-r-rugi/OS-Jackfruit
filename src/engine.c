@@ -25,16 +25,25 @@
 #include "defines.h"
 
 /*
-! --- TODO: 1 --- Implement a semaphore for the producers, that the consumer checks before exiting to ensure that all produced logs are consumed before the consumer thread exits.
+! --- TODO: 1 --- Implement a semaphore for the producers, that the consumer checks before exiting to ensure that
+!                 all produced logs are consumed before the consumer thread exits.
 ! --- TODO: 2 --- Implement the remaining CLI commands and their corresponding logic in the supervisor.
 ! --- TODO: 3 --- Implement dynamic stack allocation for `clone()` to prevent corruption on concurrent start/run commands.
 ! --- TODO: 4 --- Implement the recevie side logic for all the commands.
 */
 
 // File Specific Global Variables
+volatile sig_atomic_t stop_signal_emmited = false;
+_Atomic int server_running = true; //This will be set 
+char child_stack[STACK_SIZE];
+int CHILD_FLAGS = CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWUSER | SIGCHLD; //Namespace flags for clone
+char BASE_ROOTFS[STRUCT_STR_LEN]; //This will be set by supervisor command line argument
+struct container_info * containers_list = NULL; //Hash table to store container info, keyed by container ID
 bounded_buffer_queue logs_queue;
+pthread_mutex_t containers_list_mutex;
 
-
+//Semaphore
+_Atomic int producer_count = 0; //This will keep track of the number of active producer threads, used for graceful shutdown of consumer thread
 
 
 
@@ -223,6 +232,7 @@ void manipulate_bounded_buffer_queue(producer_data * data, int add_to_buffer){
 }
 
 void * init_producer_thread(void * arg){
+    atomic_fetch_add(&producer_count, 1); //Increment the producer count when a producer thread is created
     producer_thread_arg * info = (producer_thread_arg *)arg;
     ssize_t n = 0;
     producer_data data;
@@ -235,14 +245,16 @@ void * init_producer_thread(void * arg){
       memset(data.produced_data, 0, sizeof(data.produced_data)); // clear AFTER enqueue
     }
     printf("Producer thread for container ID: %s has exited\n", info->container_id);
+    atomic_fetch_sub(&producer_count, 1); //Decrement the producer count when a producer thread is exiting, this will signal the consumer thread to exit if there are no more producers and the buffer is empty
     free(info);
 
 }
 
 void * init_consumer_thread(){
   //quite simple consumer actually no nitin
-  while((atomic_load(&server_running) == true)){
+  while((atomic_load(&server_running) == true) || (atomic_load(&producer_count) > 0) ){
     if(is_buffer_empty()){
+      sleep(1); 
       continue;
     }
     manipulate_bounded_buffer_queue(NULL, false);
@@ -252,6 +264,15 @@ void * init_consumer_thread(){
 /* --------------------------------------------------------------------------
  * Supervisor Functions
  * -------------------------------------------------------------------------- */
+
+ void fire_response_payload(supervisor_response *response, struct sockaddr_un *client_addr, socklen_t client_addr_len){
+    int unix_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (sendto(unix_socket, response, sizeof(*response), 0,
+               (struct sockaddr *)client_addr, client_addr_len) < 0) {
+      PANIC("Failed to send response to client");
+    }
+    close(unix_socket);
+ }
 
 void sigint_handler_func(int signum) { stop_signal_emmited = true; }
 void add_container_info(container_info *info){
@@ -457,6 +478,8 @@ void init_supervisor(const char *base_rootfs) {
                 child_pid = clone(&init_start, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
                 if(child_pid < 0){
                   //Send Error response to client
+                  supervisor_response response = {.type = NACK, .state = FAILED};
+                fire_response_payload(&response, &client_addr, client_addr_len);
                 }
                 //send success response to client
                 close(producer_arg->producer_read_fd[1]); //Close the write end of the pipe in the producer thread, only the container process will write to it
@@ -464,6 +487,8 @@ void init_supervisor(const char *base_rootfs) {
                 strncpy(producer_arg->container_id, payload.id, sizeof(producer_arg->container_id) - 1);
                 pthread_create(&payload.producer_thread, NULL, init_producer_thread, producer_arg);
                 register_child_proc_with_kernel(child_pid, &payload);
+                supervisor_response response = {.type = ACK, .state = RUNNING};
+                fire_response_payload(&response, &client_addr, client_addr_len);
                 break;
             case RUN:
                 child_pid = clone(&init_run, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
@@ -496,7 +521,7 @@ void init_supervisor(const char *base_rootfs) {
  * Client Functions
  * -------------------------------------------------------------------------- */
 
-static int fire_command_payload(ipc_payload_client *payload){
+static supervisor_response fire_command_payload(ipc_payload_client *payload){
   size_t needed =
       snprintf(NULL, 0, "%s%d.sock", CONTROL_SOCKET_PATH_PREFIX, getpid()) + 1;
 
@@ -557,23 +582,23 @@ static int fire_command_payload(ipc_payload_client *payload){
         free(control_socket_path);
         PANIC_CLIENT("Failed to send file descriptor to supervisor");
     }
-    return 0; //For RUN command, we don't wait for a response from the supervisor
+    unlink(control_socket_path);
+    return; //For RUN command, we don't wait for a response from the supervisor
   }
-  if(payload->cmd == START){return 0;}
-  char buffer[256];
+  // if(payload->cmd == START){return 0;}
+  supervisor_response response;
   ssize_t bytes_received =
-      recvfrom(unix_socket, buffer, sizeof(buffer), 0, NULL, NULL);
+      recvfrom(unix_socket, &response, sizeof(supervisor_response), 0, NULL, NULL);
   if (bytes_received < 0) {
     unlink(control_socket_path);
     free(control_socket_path);
     PANIC_CLIENT("Failed to receive response from supervisor");
   }
-  printf("Received response from supervisor: %.*s\n", (int)bytes_received,
-         buffer);
+  printf("Received response from supervisor\n");
 
   unlink(control_socket_path);
   free(control_socket_path);
-  return 0;
+  return response;
 }
 
 static void init_cmd_start(int argc, char *argv[]) {
@@ -599,7 +624,12 @@ static void init_cmd_start(int argc, char *argv[]) {
     errno = EINVAL;
     PANIC_CLIENT("Failed to parse optional flags for start command");
   }
-  fire_command_payload(&payload);
+  supervisor_response response = fire_command_payload(&payload);
+  if(response.type == ACK){
+    printf("Start command acknowledged by supervisor, container is starting...\n");
+  }else{
+    PANIC_CLIENT("Supervisor responded with NACK for start command");
+  }
 }
 static void init_cmd_run(int argc, char *argv[]) {
   if (argc < 5) {
@@ -710,6 +740,9 @@ int main(int argc, char *argv[]) {
   pthread_mutex_init(&logs_queue.bounded_buffer_mutex, NULL);
   pthread_cond_init(&logs_queue.not_full, NULL);
   pthread_cond_init(&logs_queue.not_empty, NULL);
+
+  //Initialize the mutex for the containers list
+  pthread_mutex_init(&containers_list_mutex, NULL);
 
   printf("PID: %d\n", getpid());
   switch (parse_command(argv[1], argv[0])) {

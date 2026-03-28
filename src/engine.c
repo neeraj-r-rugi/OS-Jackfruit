@@ -254,7 +254,8 @@ void * init_consumer_thread(){
   //quite simple consumer actually no nitin
   while((atomic_load(&server_running) == true) || (atomic_load(&producer_count) > 0) ){
     if(is_buffer_empty()){
-      sleep(1); 
+      sleep(1);
+      if(is_buffer_empty() == false){manipulate_bounded_buffer_queue(NULL, false);} 
       continue;
     }
     manipulate_bounded_buffer_queue(NULL, false);

@@ -24,7 +24,18 @@
 #include "uthash.h"
 #include "defines.h"
 
+/*
+! --- TODO: 1 --- Implement a semaphore for the producers, that the consumer checks before exiting to ensure that all produced logs are consumed before the consumer thread exits.
+! --- TODO: 2 --- Implement the remaining CLI commands and their corresponding logic in the supervisor.
+! --- TODO: 3 --- Implement dynamic stack allocation for `clone()` to prevent corruption on concurrent start/run commands.
+! --- TODO: 4 --- Implement the recevie side logic for all the commands.
+*/
+
 // File Specific Global Variables
+bounded_buffer_queue logs_queue;
+
+
+
 
 
 /* --------------------------------------------------------------------------
@@ -148,6 +159,96 @@ void write_file(char *path, char *data) {
     write(fd, data, strlen(data));
     close(fd);
 }
+void register_child_proc_with_kernel(pid_t child_pid, ipc_payload_client *payload){
+    close(payload->await_fd[0]);
+    char path[100], map[100];
+    sprintf(path, "/proc/%d/setgroups", child_pid);
+    write_file(path, "deny");
+
+    sprintf(path, "/proc/%d/uid_map", child_pid);
+    sprintf(map, "0 %d 1", getuid());
+    write_file(path, map);
+
+    sprintf(path, "/proc/%d/gid_map", child_pid);
+    sprintf(map, "0 %d 1", getgid());
+    write_file(path, map);
+    write(payload->await_fd[1], "x", 1); //Signal the child that it can proceed with execution after setting up user namespace mappings
+}
+
+
+/* --------------------------------------------------------------------------
+ * Bounded Buffer Functions
+ * -------------------------------------------------------------------------- */
+int is_buffer_empty(){
+  pthread_mutex_lock(&logs_queue.bounded_buffer_mutex);
+  int empty = (logs_queue.count == 0)?true : false;
+  pthread_mutex_unlock(&logs_queue.bounded_buffer_mutex);
+  return empty;
+}
+
+void manipulate_bounded_buffer_queue(producer_data * data, int add_to_buffer){
+  pthread_mutex_lock(&logs_queue.bounded_buffer_mutex);
+  //Crtical Section, combined producer and consumer logic so that we dont kill ourselves debugging.
+  if(add_to_buffer){
+    while(logs_queue.count == BOUNDED_BUFFER_QUEUE_SIZE){
+      pthread_cond_wait(&logs_queue.not_full, &logs_queue.bounded_buffer_mutex);
+    }
+      producer_data * slot = malloc(sizeof(producer_data));
+      memcpy(slot, data, sizeof(producer_data));
+      logs_queue.buffer[logs_queue.tail] = slot;
+      logs_queue.tail = (logs_queue.tail + 1) % BOUNDED_BUFFER_QUEUE_SIZE;
+      logs_queue.count++;
+      pthread_cond_signal(&logs_queue.not_empty);
+  }else{
+    while(logs_queue.count == 0){
+      pthread_cond_wait(&logs_queue.not_empty, &logs_queue.bounded_buffer_mutex);
+    }
+    producer_data * slot = logs_queue.buffer[logs_queue.head];
+    char id [STRUCT_STR_LEN];
+    char produced_data[PRODUCER_DATA_LEN];
+    memcpy(id, slot->container_id, sizeof(id));
+    memcpy(produced_data, slot->produced_data, sizeof(produced_data));
+    int n = snprintf(NULL, 0, "/tmp/%s.log", id) + 1;
+    char path[n];
+    snprintf(path, n, "/tmp/%s.log", id);
+    FILE *f = fopen(path, "a");
+    fprintf(f, "%s", produced_data);
+    fclose(f);
+    free(slot);
+    logs_queue.head = (logs_queue.head + 1) % BOUNDED_BUFFER_QUEUE_SIZE;
+    logs_queue.count--;
+    pthread_cond_signal(&logs_queue.not_full);
+  }
+  pthread_mutex_unlock(&logs_queue.bounded_buffer_mutex);
+}
+
+void * init_producer_thread(void * arg){
+    producer_thread_arg * info = (producer_thread_arg *)arg;
+    ssize_t n = 0;
+    producer_data data;
+    data.pid = info->pid;
+    strncpy(data.container_id, info->container_id, sizeof(data.container_id) - 1);
+    memset(data.produced_data, 0, sizeof(data.produced_data));
+    close(info->producer_read_fd[1]); //Close the write end of the pipe in the producer thread, only the container process will write to it
+    while((n = read(info->producer_read_fd[0], data.produced_data, sizeof(data.produced_data))) > 0 ){
+      manipulate_bounded_buffer_queue(&data, true);
+      memset(data.produced_data, 0, sizeof(data.produced_data)); // clear AFTER enqueue
+    }
+    printf("Producer thread for container ID: %s has exited\n", info->container_id);
+    free(info);
+
+}
+
+void * init_consumer_thread(){
+  //quite simple consumer actually no nitin
+  while((atomic_load(&server_running) == true)){
+    if(is_buffer_empty()){
+      continue;
+    }
+    manipulate_bounded_buffer_queue(NULL, false);
+  }
+}
+
 /* --------------------------------------------------------------------------
  * Supervisor Functions
  * -------------------------------------------------------------------------- */
@@ -162,6 +263,10 @@ void add_container_info(container_info *info){
 int init_start(void *arg){
     ipc_payload_client *payload = (ipc_payload_client *)arg;
     printf("Initializing start command for container ID: %s\n", payload->id);
+    char _buf;
+    close(payload->await_fd[1]); //Close the write end of the pipe in the child, only the supervisor will write to it
+    read(payload->await_fd[0], &_buf, 1); //Wait for the supervisor to signal that it's ready for the child to proceed with execution
+    setsid();
     container_info * info = malloc(sizeof(container_info));
     strcpy(info->id, payload->id);
     strcpy(info->rootfs, payload->container_rootfs);
@@ -171,7 +276,12 @@ int init_start(void *arg){
     info->soft_mib = payload->soft_mib;
     info->hard_mib = payload->hard_mib;
     info->state = RUNNING;
+    info->producer_write_fd = payload->producer_write_fd; //The supervisor will read logs from the read end of the pipe
+    info->producer_thread = payload->producer_thread;
     add_container_info(info);
+    dup2(info->producer_write_fd, STDOUT_FILENO);
+    dup2(info->producer_write_fd, STDERR_FILENO);
+    close(info->producer_write_fd); //As the STDOUT and STDERR of the container process are now redirected to the write end of the pipe, we can close the original write end file descriptor
     sethostname(info->id, strlen(info->id));
     if(mount(info->rootfs, info->rootfs, "bind", MS_BIND | MS_REC, NULL) < 0){
         perror("Failed to bind mount rootfs");
@@ -189,6 +299,15 @@ int init_start(void *arg){
         perror("Failed to set process priority");
         return -1;
     }
+    mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+    mount("proc", "/proc", "proc", 0, NULL);
+    mount("sysfs", "/sys", "sysfs", MS_RDONLY, NULL);
+    mount("tmpfs", "/dev", "tmpfs", 0, "mode=755");
+    mount("devpts", "/dev/pts", "devpts", 0, NULL);
+    mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
+    int fd = open("/dev/null", O_RDONLY);
+    dup2(fd, STDIN_FILENO); //Redirect stdin to /dev/null for the start command since it doesn't have an attached terminal
+    close(fd);
     char *argv[] = { payload->prog, NULL };
     execv(payload->prog, argv);
     perror("Failed to exec command");
@@ -238,7 +357,7 @@ int init_run(void *arg){
     mount("tmpfs", "/dev", "tmpfs", 0, "mode=755");
     mount("devpts", "/dev/pts", "devpts", 0, NULL);
     mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
-        char *argv[] = { payload->prog, NULL };
+    char *argv[] = { payload->prog, NULL };
     execv(payload->prog, argv);
     perror("Failed to exec command");
     return -1;
@@ -276,6 +395,11 @@ void init_supervisor(const char *base_rootfs) {
 
     ipc_payload_client payload;
     struct sockaddr_un client_addr;
+
+    //Invoke the consumer thread for the logs queue
+    pthread_t consumer_thread;
+    pthread_create(&consumer_thread, NULL, init_consumer_thread, NULL);
+
     while (atomic_load(&server_running)) {
         // Wait for commands from the CLI and handle them accordingly
         memset(&client_addr, 0, sizeof(client_addr));
@@ -327,10 +451,19 @@ void init_supervisor(const char *base_rootfs) {
         
         switch(payload.cmd){
             case START:
+                producer_thread_arg *  producer_arg = malloc(sizeof(producer_thread_arg));
+                pipe(producer_arg->producer_read_fd); //Create a pipe for the container process to write logs to and supervisor to read logs from
+                payload.producer_write_fd = producer_arg->producer_read_fd[1]; //The child will write logs to the write end of the pipe
                 child_pid = clone(&init_start, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
                 if(child_pid < 0){
-                    //Send Error response to client
+                  //Send Error response to client
                 }
+                //send success response to client
+                close(producer_arg->producer_read_fd[1]); //Close the write end of the pipe in the producer thread, only the container process will write to it
+                producer_arg->pid = child_pid;
+                strncpy(producer_arg->container_id, payload.id, sizeof(producer_arg->container_id) - 1);
+                pthread_create(&payload.producer_thread, NULL, init_producer_thread, producer_arg);
+                register_child_proc_with_kernel(child_pid, &payload);
                 break;
             case RUN:
                 child_pid = clone(&init_run, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
@@ -338,21 +471,10 @@ void init_supervisor(const char *base_rootfs) {
                     //Send Error response to client
                     printf("Failed to clone child process for RUN command\n");
                 }
-                close(payload.await_fd[0]);
-                close(payload.slave_fd); //Close the slave fd in the supervisor after passing it to the child
+                //send success response to client 
                 printf("Cloned child process with PID: %d for RUN command\n", child_pid);
-                char path[100], map[100];
-                sprintf(path, "/proc/%d/setgroups", child_pid);
-                write_file(path, "deny");
-
-                sprintf(path, "/proc/%d/uid_map", child_pid);
-                sprintf(map, "0 %d 1", getuid());
-                write_file(path, map);
-
-                sprintf(path, "/proc/%d/gid_map", child_pid);
-                sprintf(map, "0 %d 1", getgid());
-                write_file(path, map);
-                write(payload.await_fd[1], "x", 1); //Signal the child that it can proceed with execution after setting up user namespace mappings
+                close(payload.slave_fd); //Close the slave fd in the supervisor after passing it to the child
+                register_child_proc_with_kernel(child_pid, &payload);
                 break;
             default:
                 break;
@@ -362,7 +484,12 @@ void init_supervisor(const char *base_rootfs) {
             atomic_store(&server_running, false);
         }
     }
+    printf("\nSupervisor shutting down, waiting for consumer thread to finish processing logs...\n");
+    atomic_store(&server_running, false);
+    pthread_cond_broadcast(&logs_queue.not_empty); // wake the consumer so it can check the exit condition  
+    pthread_join(consumer_thread, NULL);
     unlink(SUPERVISOR_SOCKET_PATH);
+    printf("Supervisor exiting gracefully\n");
 }
 
 /* --------------------------------------------------------------------------
@@ -432,6 +559,7 @@ static int fire_command_payload(ipc_payload_client *payload){
     }
     return 0; //For RUN command, we don't wait for a response from the supervisor
   }
+  if(payload->cmd == START){return 0;}
   char buffer[256];
   ssize_t bytes_received =
       recvfrom(unix_socket, buffer, sizeof(buffer), 0, NULL, NULL);
@@ -447,11 +575,6 @@ static int fire_command_payload(ipc_payload_client *payload){
   free(control_socket_path);
   return 0;
 }
-/*
- * TODO: 1. ADD the remaining cli commands with the interface.
- * TODO: 2. Think of the data structure to store the running PIDs
- * TODO: 3. Begin actually executing the commands.
- * */
 
 static void init_cmd_start(int argc, char *argv[]) {
   if (argc < 5) {
@@ -579,6 +702,15 @@ int main(int argc, char *argv[]) {
       return 1;
     }
   }
+  //Initialize the logs queue
+  logs_queue.head = 0;
+  logs_queue.tail = 0;
+  logs_queue.count = 0;
+  memset(logs_queue.buffer, 0, sizeof(logs_queue.buffer));
+  pthread_mutex_init(&logs_queue.bounded_buffer_mutex, NULL);
+  pthread_cond_init(&logs_queue.not_full, NULL);
+  pthread_cond_init(&logs_queue.not_empty, NULL);
+
   printf("PID: %d\n", getpid());
   switch (parse_command(argv[1], argv[0])) {
   case CLI_SUPERVISOR:

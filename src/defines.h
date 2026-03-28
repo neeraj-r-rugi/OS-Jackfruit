@@ -14,6 +14,9 @@
 #define STRUCT_STR_LEN 256
 #define STACK_SIZE (1024 * 1024) //8 MiB stack for each container
 
+#define BOUNDED_BUFFER_QUEUE_SIZE 256
+#define PRODUCER_DATA_LEN 4096
+
 //PANIC macros for supervisor and client
 #define PANIC(...)                                                      \
     do {                                                                \
@@ -29,7 +32,7 @@
         exit(1);                                                        \
     } while (0)
 
-//structs
+//ENUMS
 typedef enum{
     CLI_SUPERVISOR,
     CLI_START,
@@ -49,17 +52,6 @@ typedef enum{
     SUCCESS
 }ipc_command_type;
 
-typedef struct{
-    char id[STRUCT_STR_LEN];
-    char container_rootfs[STRUCT_STR_LEN];
-    char prog[STRUCT_STR_LEN]; //Command to run for RUN command, not used for START command
-    int nice;     //-20 to 19
-    int slave_fd; //Used for redirecting container's stdout and stderr to CLI, not used for START command
-    int await_fd[2]; //Used for synchronizing between supervisor and child process during startup, not used for RUN command
-    ipc_command_type cmd;
-    unsigned long int soft_mib; //in MiB
-    unsigned long int hard_mib; //in MiB
-}ipc_payload_client;
 
 typedef enum{
     RUNNING,
@@ -68,8 +60,23 @@ typedef enum{
     EXITED
 }container_state;
 
-typedef struct container_info{
+//STRUCTS
+typedef struct{
     char id[STRUCT_STR_LEN];
+    char container_rootfs[STRUCT_STR_LEN];
+    char prog[STRUCT_STR_LEN]; //Command to run for RUN command, not used for START command
+    int nice;     //-20 to 19
+    int slave_fd; //Used for redirecting container's stdout and stderr to CLI, not used for START command
+    int await_fd[2]; //Used for synchronizing between supervisor and child process during startup, not used for RUN command
+    int producer_write_fd; //Used for writing logs from the container process to the producer thread, not used for RUN command
+    ipc_command_type cmd;
+    unsigned long int soft_mib; //in MiB
+    unsigned long int hard_mib; //in MiB
+    pthread_t producer_thread;
+}ipc_payload_client;
+
+typedef struct container_info{
+    char id[STRUCT_STR_LEN]; //Main identifier for the hash table, should be unique for each container
     char rootfs[STRUCT_STR_LEN];
     char run_cli_socket_path[STRUCT_STR_LEN]; 
     container_state state;
@@ -78,9 +85,36 @@ typedef struct container_info{
     int exit_code; //used for PS command response
     int exit_signal; //used for PS command response
     pid_t host_pid;
+    int producer_write_fd; //Used for reading logs from the container process, supervisor will read from read_fd[0] and container process will write to read_fd[1]
+    pthread_t producer_thread; 
     UT_hash_handle hh;
 
 }container_info;
+
+
+typedef struct producer_thread_arg{
+
+    char container_id[STRUCT_STR_LEN];\
+    int producer_read_fd[2]; //Used for reading logs from the container process, supervisor will read from read_fd[0] and container process will write to read_fd[1]
+    int pid;
+
+}producer_thread_arg;
+
+typedef struct producer_data{
+    int pid;
+    char container_id[STRUCT_STR_LEN];
+    char produced_data[PRODUCER_DATA_LEN];
+}producer_data;
+
+typedef struct bounded_buffer_queue{
+    producer_data * buffer[BOUNDED_BUFFER_QUEUE_SIZE];
+    int head;
+    int tail;
+    int count;
+    pthread_mutex_t bounded_buffer_mutex;
+    pthread_cond_t not_full;
+    pthread_cond_t not_empty;
+}bounded_buffer_queue;
 
 //Global variables
 volatile sig_atomic_t stop_signal_emmited = false;

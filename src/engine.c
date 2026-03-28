@@ -264,6 +264,20 @@ void * init_consumer_thread(){
 /* --------------------------------------------------------------------------
  * Supervisor Functions
  * -------------------------------------------------------------------------- */
+void traverse_hashtable(){
+    pthread_mutex_lock(&containers_list_mutex);
+    FILE *f = fopen(PS_LOGS_PATH, "w");
+    container_info *curr, *tmp;
+    if(containers_list == NULL){
+        fprintf(f, "No active containers\n");
+    }
+    HASH_ITER(hh, containers_list, curr, tmp) {
+        fprintf(f,"Container ID: %s, Host PID: %d, State: %d\n", curr->id, curr->host_pid, curr->state);
+
+    }
+    fclose(f);
+    pthread_mutex_unlock(&containers_list_mutex);
+}
 
  void fire_response_payload(supervisor_response *response, struct sockaddr_un *client_addr, socklen_t client_addr_len){
     int unix_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -299,7 +313,7 @@ int init_start(void *arg){
     info->state = RUNNING;
     info->producer_write_fd = payload->producer_write_fd; //The supervisor will read logs from the read end of the pipe
     info->producer_thread = payload->producer_thread;
-    add_container_info(info);
+    
     dup2(info->producer_write_fd, STDOUT_FILENO);
     dup2(info->producer_write_fd, STDERR_FILENO);
     close(info->producer_write_fd); //As the STDOUT and STDERR of the container process are now redirected to the write end of the pipe, we can close the original write end file descriptor
@@ -354,7 +368,6 @@ int init_run(void *arg){
     info->soft_mib = payload->soft_mib;
     info->hard_mib = payload->hard_mib;
     info->state = RUNNING;
-    add_container_info(info);
     sethostname(info->id, strlen(info->id));
     if(mount(info->rootfs, info->rootfs, "bind", MS_BIND | MS_REC, NULL) < 0){
         perror("Failed to bind mount rootfs");
@@ -393,6 +406,7 @@ void init_supervisor(const char *base_rootfs) {
     }strncpy(BASE_ROOTFS, base_rootfs, sizeof(BASE_ROOTFS) - 1);
     // Open a UNIX domain socket for communication with the CLI
     unlink(SUPERVISOR_SOCKET_PATH); // Ensure old socket is removed
+    unlink(PS_LOGS_PATH); // Ensure old ps logs file is removed
     int unix_socket = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (bind(unix_socket,
             (struct sockaddr *)&(struct sockaddr_un){
@@ -420,7 +434,7 @@ void init_supervisor(const char *base_rootfs) {
     //Invoke the consumer thread for the logs queue
     pthread_t consumer_thread;
     pthread_create(&consumer_thread, NULL, init_consumer_thread, NULL);
-
+    container_info * info;
     while (atomic_load(&server_running)) {
         // Wait for commands from the CLI and handle them accordingly
         memset(&client_addr, 0, sizeof(client_addr));
@@ -480,6 +494,7 @@ void init_supervisor(const char *base_rootfs) {
                   //Send Error response to client
                   supervisor_response response = {.type = NACK, .state = FAILED};
                 fire_response_payload(&response, &client_addr, client_addr_len);
+                break;
                 }
                 //send success response to client
                 close(producer_arg->producer_read_fd[1]); //Close the write end of the pipe in the producer thread, only the container process will write to it
@@ -489,17 +504,45 @@ void init_supervisor(const char *base_rootfs) {
                 register_child_proc_with_kernel(child_pid, &payload);
                 supervisor_response response = {.type = ACK, .state = RUNNING};
                 fire_response_payload(&response, &client_addr, client_addr_len);
+                //Hashing Container Info
+                info = malloc(sizeof(container_info));
+                strcpy(info->id, payload.id);
+                strcpy(info->rootfs, payload.container_rootfs);
+                info->host_pid = child_pid;
+                info->exit_code = -1; //Default value indicating not exited
+                info->exit_signal = -1; //Default value indicating not exited by signal
+                info->soft_mib = payload.soft_mib;
+                info->hard_mib = payload.hard_mib;
+                info->state = RUNNING;
+                add_container_info(info);
                 break;
             case RUN:
                 child_pid = clone(&init_run, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
                 if(child_pid < 0){
                     //Send Error response to client
                     printf("Failed to clone child process for RUN command\n");
+                    break;
                 }
                 //send success response to client 
                 printf("Cloned child process with PID: %d for RUN command\n", child_pid);
                 close(payload.slave_fd); //Close the slave fd in the supervisor after passing it to the child
                 register_child_proc_with_kernel(child_pid, &payload);
+                //Hashing Container Info
+                info = malloc(sizeof(container_info));
+                strcpy(info->id, payload.id);
+                strcpy(info->rootfs, payload.container_rootfs);
+                info->host_pid = child_pid;
+                info->exit_code = -1; //Default value indicating not exited
+                info->exit_signal = -1; //Default value indicating not exited by signal
+                info->soft_mib = payload.soft_mib;
+                info->hard_mib = payload.hard_mib;
+                info->state = RUNNING;
+                add_container_info(info);
+                break;
+            case PS:
+                traverse_hashtable();
+                supervisor_response ps_response = {.type = FILE_LOC, .data = PS_LOGS_PATH};
+                fire_response_payload(&ps_response, &client_addr, client_addr_len);
                 break;
             default:
                 break;
@@ -689,8 +732,18 @@ static void init_cmd_ps(void){
   ipc_payload_client payload;
   memset(&payload, 0, sizeof(payload));
   payload.cmd = PS;
-  fire_command_payload(&payload);
-
+  supervisor_response respone = fire_command_payload(&payload);
+  int fd = open(respone.data, O_RDONLY);
+  if(fd < 0){
+    PANIC_CLIENT("Failed to open ps logs file");
+  }
+  char buf[256];
+  ssize_t n;
+  printf("All containers:\n");
+  while((n = read(fd, buf, sizeof(buf))) > 0){
+    write(STDOUT_FILENO, buf, n);
+  }
+  close(fd);
 }
 static void init_cmd_logs(int argc, char * argv[]){
   if (argc < 3) {

@@ -10,6 +10,7 @@
 
 #define SUPERVISOR_SOCKET_PATH "/tmp/supervisor.sock"
 #define CONTROL_SOCKET_PATH_PREFIX "/tmp/cli_runtime-" //!! This will be suffixed with the PID of CLI for unique socket per CLI instance
+#define PS_LOGS_PATH "/tmp/supervisor_output.log"
 
 #define STRUCT_STR_LEN 256
 #define STACK_SIZE (1024 * 1024) //8 MiB stack for each container

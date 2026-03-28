@@ -353,12 +353,12 @@ int init_run(void *arg){
     char _buf;
     close(payload->await_fd[1]); //Close the write end of the pipe in the child, only the supervisor will write to it
     read(payload->await_fd[0], &_buf, 1); //Wait for the supervisor to signal that it's ready for the child to proceed with execution
+    printf("Initializing start command for container ID: %s\n", payload->id);
     setsid();
     ioctl(payload->slave_fd, TIOCSCTTY, 0);
     dup2(payload->slave_fd, STDIN_FILENO);
     dup2(payload->slave_fd, STDOUT_FILENO);
     dup2(payload->slave_fd, STDERR_FILENO);
-    printf("Initializing start command for container ID: %s\n", payload->id);
     container_info * info = malloc(sizeof(container_info));
     strcpy(info->id, payload->id);
     strcpy(info->rootfs, payload->container_rootfs);
@@ -395,6 +395,29 @@ int init_run(void *arg){
     execv(payload->prog, argv);
     perror("Failed to exec command");
     return -1;
+}
+void init_stop_handler(struct sockaddr_un client_addr, socklen_t client_addr_len, ipc_payload_client payload){
+    pthread_mutex_lock(&containers_list_mutex);
+    supervisor_response response;
+    container_info * info;
+    HASH_FIND_STR(containers_list, payload.id, info);
+    if(info == NULL){
+      printf("Container with ID: %s not found\n", payload.id);
+      pthread_mutex_unlock(&containers_list_mutex);
+      response = (supervisor_response){.type = NACK, .state = FAILED};
+      fire_response_payload(&response, &client_addr, client_addr_len);
+      return;
+    }
+    if(kill(info->host_pid, SIGKILL) < 0){
+      printf("Failed to send SIGTERM to container with ID: %s\n", payload.id);
+      pthread_mutex_unlock(&containers_list_mutex);
+      response = (supervisor_response){.type = NACK, .state = FAILED};
+      fire_response_payload(&response, &client_addr, client_addr_len);
+      return;
+    }
+    info->state = STOPPED;              
+    fire_response_payload(&(supervisor_response){.type = ACK}, &client_addr, client_addr_len);
+    pthread_mutex_unlock(&containers_list_mutex);
 }
 void init_supervisor(const char *base_rootfs) {
 
@@ -543,6 +566,10 @@ void init_supervisor(const char *base_rootfs) {
                 traverse_hashtable();
                 supervisor_response ps_response = {.type = FILE_LOC, .data = PS_LOGS_PATH};
                 fire_response_payload(&ps_response, &client_addr, client_addr_len);
+                break;
+              case STOP:
+                init_stop_handler(client_addr, client_addr_len, payload);
+
                 break;
             default:
                 break;
@@ -767,7 +794,12 @@ static void init_cmd_stop(int argc, char * argv[]){
   memset(&payload, 0, sizeof(payload));
   payload.cmd = STOP;
   strncpy(payload.id, argv[2], sizeof(payload.id) - 1);
-  fire_command_payload(&payload);
+  supervisor_response response = fire_command_payload(&payload);
+  if(response.type == ACK){
+    printf("Stop command acknowledged by supervisor, container is stopping...\n");
+  }else{
+    PANIC_CLIENT("Supervisor responded with NACK for stop command, No such container with ID\n");
+  }
 
 }
 /* --------------------------------------------------------------------------

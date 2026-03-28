@@ -297,7 +297,7 @@ void add_container_info(container_info *info){
 
 int init_start(void *arg){
     ipc_payload_client *payload = (ipc_payload_client *)arg;
-    printf("Initializing start command for container ID: %s\n", payload->id);
+    printf("%15s>>>[CHILD INIT]: Initializing START command for container ID: %s\n", "", payload->id);
     char _buf;
     close(payload->await_fd[1]); //Close the write end of the pipe in the child, only the supervisor will write to it
     read(payload->await_fd[0], &_buf, 1); //Wait for the supervisor to signal that it's ready for the child to proceed with execution
@@ -353,7 +353,7 @@ int init_run(void *arg){
     char _buf;
     close(payload->await_fd[1]); //Close the write end of the pipe in the child, only the supervisor will write to it
     read(payload->await_fd[0], &_buf, 1); //Wait for the supervisor to signal that it's ready for the child to proceed with execution
-    printf("Initializing start command for container ID: %s\n", payload->id);
+    printf("%15s>>>[CHILD INIT]: Initializing RUN command for container ID: %s\n", "",payload->id);
     setsid();
     ioctl(payload->slave_fd, TIOCSCTTY, 0);
     dup2(payload->slave_fd, STDIN_FILENO);
@@ -402,14 +402,14 @@ void init_stop_handler(struct sockaddr_un client_addr, socklen_t client_addr_len
     container_info * info;
     HASH_FIND_STR(containers_list, payload.id, info);
     if(info == NULL){
-      printf("Container with ID: %s not found\n", payload.id);
+      printf("[STOP ERROR]: Container with ID: %s not found\n", payload.id);
       pthread_mutex_unlock(&containers_list_mutex);
       response = (supervisor_response){.type = NACK, .state = FAILED};
       fire_response_payload(&response, &client_addr, client_addr_len);
       return;
     }
     if(kill(info->host_pid, SIGKILL) < 0){
-      printf("Failed to send SIGTERM to container with ID: %s\n", payload.id);
+      printf("[STOP ERROR]: Failed to send SIGTERM to container with ID: %s\n", payload.id);
       pthread_mutex_unlock(&containers_list_mutex);
       response = (supervisor_response){.type = NACK, .state = FAILED};
       fire_response_payload(&response, &client_addr, client_addr_len);
@@ -449,7 +449,7 @@ void init_supervisor(const char *base_rootfs) {
     sigaction(SIGINT, &sigint_handler, NULL);
     sigaction(SIGTERM, &sigint_handler, NULL);
 
-    printf("Supervisor initialized with base rootfs: %s\n", base_rootfs);
+    printf("> Supervisor initialized with base rootfs: %s\n", base_rootfs);
 
     ipc_payload_client payload;
     struct sockaddr_un client_addr;
@@ -475,7 +475,7 @@ void init_supervisor(const char *base_rootfs) {
             }
         PANIC("Failed to receive data from socket");
         }
-        printf("Received command: %d for container ID: %s\n", payload.cmd,
+        printf("%10s>>Received command: %d for container ID: %s\n", "",payload.cmd,
             payload.id);
         if(payload.cmd == RUN){
           struct msghdr msg = {0};
@@ -543,11 +543,11 @@ void init_supervisor(const char *base_rootfs) {
                 child_pid = clone(&init_run, child_stack + STACK_SIZE, CHILD_FLAGS, &payload);
                 if(child_pid < 0){
                     //Send Error response to client
-                    printf("Failed to clone child process for RUN command\n");
+                    printf("%15s>>>Failed to clone child process for RUN command\n", "");
                     break;
                 }
                 //send success response to client 
-                printf("Cloned child process with PID: %d for RUN command\n", child_pid);
+                printf("%15s>>>Cloned child process with PID: %d for RUN command\n", "", child_pid);
                 close(payload.slave_fd); //Close the slave fd in the supervisor after passing it to the child
                 register_child_proc_with_kernel(child_pid, &payload);
                 //Hashing Container Info
@@ -579,12 +579,12 @@ void init_supervisor(const char *base_rootfs) {
             atomic_store(&server_running, false);
         }
     }
-    printf("\nSupervisor shutting down, waiting for consumer thread to finish processing logs...\n");
+    printf("\n>Supervisor shutting down, waiting for consumer thread to finish processing logs...\n");
     atomic_store(&server_running, false);
     pthread_cond_broadcast(&logs_queue.not_empty); // wake the consumer so it can check the exit condition  
     pthread_join(consumer_thread, NULL);
     unlink(SUPERVISOR_SOCKET_PATH);
-    printf("Supervisor exiting gracefully\n");
+    printf(">Supervisor exiting gracefully\n");
 }
 
 /* --------------------------------------------------------------------------

@@ -273,8 +273,10 @@ void traverse_hashtable(){
         fprintf(f, "No active containers\n");
     }
     HASH_ITER(hh, containers_list, curr, tmp) {
+      if(curr->stopped == STOPPED)
+        fprintf(f,"Container ID: %s, Host PID: %d, State: %d, STOPPED\n", curr->id, curr->host_pid, curr->state);
+      else
         fprintf(f,"Container ID: %s, Host PID: %d, State: %d\n", curr->id, curr->host_pid, curr->state);
-
     }
     fclose(f);
     pthread_mutex_unlock(&containers_list_mutex);
@@ -416,7 +418,7 @@ void init_stop_handler(struct sockaddr_un client_addr, socklen_t client_addr_len
       fire_response_payload(&response, &client_addr, client_addr_len);
       return;
     }
-    info->state = STOPPED;              
+    info->stopped = STOPPED;              
     fire_response_payload(&(supervisor_response){.type = ACK}, &client_addr, client_addr_len);
     pthread_mutex_unlock(&containers_list_mutex);
 }
@@ -440,6 +442,56 @@ void init_log_handler(struct sockaddr_un client_addr, socklen_t client_addr_len,
     fire_response_payload(&response, &client_addr, client_addr_len);
     pthread_mutex_unlock(&containers_list_mutex);
 }
+
+void * init_repear(void * arg){
+  (void)arg;
+  sigset_t sigchld_mask;
+  sigemptyset(&sigchld_mask);
+  sigaddset(&sigchld_mask, SIGCHLD);
+  while(atomic_load(&server_running)){
+    siginfo_t signal_info; //This will be used to get the PID of the child process that exited and its exit status
+    int signal = sigwaitinfo(&sigchld_mask, &signal_info);
+    if(signal < 0){
+      if(errno == EINTR) continue; // Interrupted by signal, check server_running and continue
+      perror("[REPEAR ERROR]: sigwaitinfo failed");
+      break;
+    }
+
+    int status;
+    pid_t exited_pid;
+    while((exited_pid = waitpid(-1, &status, WNOHANG)) > 0){
+      pthread_mutex_lock(&containers_list_mutex);
+      container_info * entry = NULL;
+      container_info * curr, * tmp;
+      HASH_ITER(hh, containers_list, curr, tmp){
+        if(curr->host_pid == exited_pid){
+          entry = curr;
+          break;
+        }
+      }
+      if(entry == NULL){
+        printf("[REPEAR WARNING] NOT SYNCING: Received SIGCHLD for unknown child process with PID: %d\n", exited_pid);
+        printf("[REPEAR WARNING]: Termination of supervisor recommeded\n");
+        pthread_mutex_unlock(&containers_list_mutex);
+        continue;
+      }
+      if(WIFEXITED(status)){
+        entry->exit_code = WEXITSTATUS(status);
+        entry->state = EXITED;
+        printf("[REPEAR]: Container with ID: %s and PID: %d exited with exit code: %d\n", entry->id, exited_pid, entry->exit_code);
+      
+    }
+    if(WIFSIGNALED(status)){
+      entry->exit_signal = WTERMSIG(status);
+      entry->state = KILLED;
+      printf("[REPEAR]: Container with ID: %s and PID: %d killed by signal: %d\n", entry->id, exited_pid, entry->exit_signal); 
+    }
+      pthread_mutex_unlock(&containers_list_mutex);
+    }
+  }
+  return NULL;
+}
+
 void init_supervisor(const char *base_rootfs) {
 
     //Check if the base rootfs exists and is a directory
@@ -458,6 +510,13 @@ void init_supervisor(const char *base_rootfs) {
             sizeof(struct sockaddr_un)) < 0) {
         PANIC("Failed to bind UNIX socket");
     }
+
+    //SIGCHILD Handler to reap child processes and update their state in the hashtable
+    // Block SIGCHLD before spawning ANY threads so all threads inherit the mask
+    sigset_t sigchld_mask;
+    sigemptyset(&sigchld_mask);
+    sigaddset(&sigchld_mask, SIGCHLD);
+    pthread_sigmask(SIG_BLOCK, &sigchld_mask, NULL);
 
     // Register signal handlers for graceful shutdown
     struct sigaction sigint_handler;
@@ -478,6 +537,11 @@ void init_supervisor(const char *base_rootfs) {
     //Invoke the consumer thread for the logs queue
     pthread_t consumer_thread;
     pthread_create(&consumer_thread, NULL, init_consumer_thread, NULL);
+
+    //Invoke the reaper thread for handling SIGCHLD and updating container states
+    pthread_t reaper_thread;
+    pthread_create(&reaper_thread, NULL, init_repear, NULL);
+
     container_info * info;
     while (atomic_load(&server_running)) {
         // Wait for commands from the CLI and handle them accordingly
@@ -605,6 +669,8 @@ void init_supervisor(const char *base_rootfs) {
     printf("\n>Supervisor shutting down, waiting for consumer thread to finish processing logs...\n");
     atomic_store(&server_running, false);
     pthread_cond_broadcast(&logs_queue.not_empty); // wake the consumer so it can check the exit condition  
+    pthread_kill(reaper_thread, SIGCHLD);
+    pthread_join(reaper_thread, NULL); 
     pthread_join(consumer_thread, NULL);
     unlink(SUPERVISOR_SOCKET_PATH);
     printf(">Supervisor exiting gracefully\n");

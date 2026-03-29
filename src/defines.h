@@ -92,6 +92,7 @@ typedef struct container_info{
     unsigned long int hard_mib; //in MiB
     int exit_code; //used for PS command response
     int exit_signal; //used for PS command response
+    int stopped;
     pid_t host_pid;
     int producer_write_fd; //Used for reading logs from the container process, supervisor will read from read_fd[0] and container process will write to read_fd[1]
     pthread_t producer_thread; 

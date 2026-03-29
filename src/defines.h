@@ -96,7 +96,8 @@ typedef struct container_info{
     int stopped;
     pid_t host_pid;
     int producer_write_fd; //Used for reading logs from the container process, supervisor will read from read_fd[0] and container process will write to read_fd[1]
-    pthread_t producer_thread; 
+    pthread_t producer_thread;
+    struct tm * creation_time;  
     UT_hash_handle hh;
 
 }container_info;

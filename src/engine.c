@@ -25,11 +25,7 @@
 #include "defines.h"
 
 /*
-! --- TODO: 1 --- Implement a semaphore for the producers, that the consumer checks before exiting to ensure that
-!                 all produced logs are consumed before the consumer thread exits.
-! --- TODO: 2 --- Implement the remaining CLI commands and their corresponding logic in the supervisor.
-! --- TODO: 3 --- Implement dynamic stack allocation for `clone()` to prevent corruption on concurrent start/run commands.
-! --- TODO: 4 --- Implement the recevie side logic for all the commands.
+! NO AI LETS GOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
 */
 
 // File Specific Global Variables
@@ -281,9 +277,9 @@ void traverse_hashtable(){
     }
     HASH_ITER(hh, containers_list, curr, tmp) {
       if(curr->stopped == STOPPED)
-        fprintf(f,"Container ID: %s, Host PID: %d, State: %d, STOPPED\n", curr->id, curr->host_pid, curr->state);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%02d:%02d:%02d| State: %d | STOPPED|\n", curr->id, curr->host_pid, curr->creation_time->tm_hour, curr->creation_time->tm_min, curr->creation_time->tm_sec, curr->state);
       else
-        fprintf(f,"Container ID: %s, Host PID: %d, State: %d\n", curr->id, curr->host_pid, curr->state);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%02d:%02d:%02d| State: %d |\n", curr->id, curr->host_pid, curr->creation_time->tm_hour, curr->creation_time->tm_min, curr->creation_time->tm_sec, curr->state);
     }
     fclose(f);
     pthread_mutex_unlock(&containers_list_mutex);
@@ -636,6 +632,8 @@ void init_supervisor(const char *base_rootfs) {
                 info->soft_mib = payload.soft_mib;
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
+                time_t now = time(NULL);
+                info->creation_time = localtime(&now);
                 add_container_info(info);
                 break;
             case RUN:
@@ -659,6 +657,8 @@ void init_supervisor(const char *base_rootfs) {
                 info->soft_mib = payload.soft_mib;
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
+                time_t now_run = time(NULL);
+                info->creation_time = localtime(&now_run);
                 add_container_info(info);
                 break;
             case PS:

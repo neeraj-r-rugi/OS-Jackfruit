@@ -277,9 +277,9 @@ void traverse_hashtable(){
     }
     HASH_ITER(hh, containers_list, curr, tmp) {
       if(curr->stopped == STOPPED)
-        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%02d:%02d:%02d| State: %d | STOPPED|\n", curr->id, curr->host_pid, curr->creation_time->tm_hour, curr->creation_time->tm_min, curr->creation_time->tm_sec, curr->state);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d | STOPPED|\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state);
       else
-        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%02d:%02d:%02d| State: %d |\n", curr->id, curr->host_pid, curr->creation_time->tm_hour, curr->creation_time->tm_min, curr->creation_time->tm_sec, curr->state);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d |\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state);
     }
     fclose(f);
     pthread_mutex_unlock(&containers_list_mutex);
@@ -601,7 +601,8 @@ void init_supervisor(const char *base_rootfs) {
             fire_response_payload(&response, &client_addr, client_addr_len);
             continue;
         }
-        
+         time_t now_run = time(NULL);
+         struct tm *creation_time_run;
         switch(payload.cmd){
             case START:
                 producer_thread_arg *  producer_arg = malloc(sizeof(producer_thread_arg));
@@ -632,8 +633,9 @@ void init_supervisor(const char *base_rootfs) {
                 info->soft_mib = payload.soft_mib;
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
-                time_t now = time(NULL);
-                info->creation_time = localtime(&now);
+               
+                creation_time_run = localtime(&now_run);
+                snprintf(info->creation_time_str, sizeof(info->creation_time_str), "%02d:%02d:%02d", creation_time_run->tm_hour, creation_time_run->tm_min, creation_time_run->tm_sec);
                 add_container_info(info);
                 break;
             case RUN:
@@ -657,8 +659,8 @@ void init_supervisor(const char *base_rootfs) {
                 info->soft_mib = payload.soft_mib;
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
-                time_t now_run = time(NULL);
-                info->creation_time = localtime(&now_run);
+                creation_time_run = localtime(&now_run);
+                snprintf(info->creation_time_str, sizeof(info->creation_time_str), "%02d:%02d:%02d", creation_time_run->tm_hour, creation_time_run->tm_min, creation_time_run->tm_sec);
                 add_container_info(info);
                 break;
             case PS:

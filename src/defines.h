@@ -88,6 +88,7 @@ typedef struct container_info{
     char id[STRUCT_STR_LEN]; //Main identifier for the hash table, should be unique for each container
     char rootfs[STRUCT_STR_LEN];
     char run_cli_socket_path[STRUCT_STR_LEN]; 
+    char creation_time_str[STRUCT_STR_LEN]; //String representation of the creation time, used for PS command response
     container_state state;
     unsigned long int soft_mib; //in MiB
     unsigned long int hard_mib; //in MiB
@@ -96,8 +97,7 @@ typedef struct container_info{
     int stopped;
     pid_t host_pid;
     int producer_write_fd; //Used for reading logs from the container process, supervisor will read from read_fd[0] and container process will write to read_fd[1]
-    pthread_t producer_thread;
-    struct tm * creation_time;  
+    pthread_t producer_thread;  
     UT_hash_handle hh;
 
 }container_info;

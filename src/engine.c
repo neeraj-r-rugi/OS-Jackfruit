@@ -420,6 +420,26 @@ void init_stop_handler(struct sockaddr_un client_addr, socklen_t client_addr_len
     fire_response_payload(&(supervisor_response){.type = ACK}, &client_addr, client_addr_len);
     pthread_mutex_unlock(&containers_list_mutex);
 }
+void init_log_handler(struct sockaddr_un client_addr, socklen_t client_addr_len, ipc_payload_client payload){
+    pthread_mutex_lock(&containers_list_mutex);
+    supervisor_response response;
+    container_info * info;
+    HASH_FIND_STR(containers_list, payload.id, info);
+    if(info == NULL){
+      printf("[LOGS ERROR]: Container with ID: %s not found\n", payload.id);
+      pthread_mutex_unlock(&containers_list_mutex);
+      response = (supervisor_response){.type = NACK};
+      fire_response_payload(&response, &client_addr, client_addr_len);
+      return;
+    }
+    int n = snprintf(NULL, 0, "/tmp/%s.log", payload.id) + 1;
+    char path[n];
+    snprintf(path, n, "/tmp/%s.log", payload.id);
+    response = (supervisor_response){.type = FILE_LOC};
+    strncpy(response.data, path, sizeof(response.data) - 1);
+    fire_response_payload(&response, &client_addr, client_addr_len);
+    pthread_mutex_unlock(&containers_list_mutex);
+}
 void init_supervisor(const char *base_rootfs) {
 
     //Check if the base rootfs exists and is a directory
@@ -570,8 +590,10 @@ void init_supervisor(const char *base_rootfs) {
                 break;
               case STOP:
                 init_stop_handler(client_addr, client_addr_len, payload);
-
                 break;
+              case LOGS:
+              init_log_handler(client_addr, client_addr_len, payload);
+              break;
             default:
                 break;
 
@@ -783,7 +805,22 @@ static void init_cmd_logs(int argc, char * argv[]){
   memset(&payload, 0, sizeof(payload));
   payload.cmd = LOGS;
   strncpy(payload.id, argv[2], sizeof(payload.id) - 1);
-  fire_command_payload(&payload);
+  supervisor_response response = fire_command_payload(&payload);
+  if(response.type == FILE_LOC){
+    printf("Logs command acknowledged by supervisor, fetching logs...\n");
+    int fd = open(response.data, O_RDONLY);
+    if(fd < 0){
+      PANIC_CLIENT("Failed to open logs file");
+    }
+    char buf[256];
+    ssize_t n;
+    while((n = read(fd, buf, sizeof(buf))) > 0){
+      write(STDOUT_FILENO, buf, n);
+    }
+    close(fd);
+  }else{
+    PANIC_CLIENT("Supervisor responded with NACK for logs command, No such container with ID\n");
+  }
 }
 static void init_cmd_stop(int argc, char * argv[]){
 	if(argc < 3) {

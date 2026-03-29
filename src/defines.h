@@ -65,7 +65,8 @@ typedef enum{
 typedef enum{
     ACK,
     NACK,
-    FILE_LOC
+    FILE_LOC,
+    DUPLICATE_ID
 }supervisor_response_type;
 
 //STRUCTS

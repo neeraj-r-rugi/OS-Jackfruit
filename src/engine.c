@@ -265,6 +265,13 @@ void * init_consumer_thread(){
 /* --------------------------------------------------------------------------
  * Supervisor Functions
  * -------------------------------------------------------------------------- */
+int check_if_duplicate(char *id){
+    pthread_mutex_lock(&containers_list_mutex);
+    container_info * info;
+    HASH_FIND_STR(containers_list, id, info);
+    pthread_mutex_unlock(&containers_list_mutex);
+    return (info != NULL)? true : false;
+}
 void traverse_hashtable(){
     pthread_mutex_lock(&containers_list_mutex);
     FILE *f = fopen(PS_LOGS_PATH, "w");
@@ -591,6 +598,13 @@ void init_supervisor(const char *base_rootfs) {
         }
         pid_t child_pid;
         pipe(payload.await_fd); //Create a pipe for synchronizing between supervisor and child during startup
+        if(check_if_duplicate(payload.id)){
+            printf("[ERROR]: Container with ID: %s already exists\n", payload.id);
+            supervisor_response response = {.type = DUPLICATE_ID, .state = FAILED, .data = "Container ID already exists"};
+
+            fire_response_payload(&response, &client_addr, client_addr_len);
+            continue;
+        }
         
         switch(payload.cmd){
             case START:
@@ -787,6 +801,9 @@ static void init_cmd_start(int argc, char *argv[]) {
   if(response.type == ACK){
     printf("Start command acknowledged by supervisor, container is starting...\n");
   }else{
+    if(response.type == DUPLICATE_ID){
+      PANIC_CLIENT("Supervisor responded with NACK for start command, Container ID already exists");
+    }
     PANIC_CLIENT("Supervisor responded with NACK for start command");
   }
 }

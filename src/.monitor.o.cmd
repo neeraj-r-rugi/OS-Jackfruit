@@ -1177,7 +1177,6 @@ deps_monitor.o := \
     $(wildcard include/config/MEMORY_BALLOON) \
     $(wildcard include/config/BALLOON_COMPACTION) \
     $(wildcard include/config/X86) \
-  /usr/src/linux-headers-6.17.0-19-generic/include/linux/hashtable.h \
   /usr/src/linux-headers-6.17.0-19-generic/include/generated/uapi/linux/version.h \
   kernel_defines.h \
 

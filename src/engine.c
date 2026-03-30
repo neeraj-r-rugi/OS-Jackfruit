@@ -23,6 +23,8 @@
 #include <pty.h>
 #include "uthash.h"
 #include "defines.h"
+#include "kernel_defines.h"
+
 
 /*
 ! NO AI LETS GOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
@@ -179,6 +181,64 @@ void register_child_proc_with_kernel(pid_t child_pid, ipc_payload_client *payloa
     write_file(path, map);
     write(payload->await_fd[1], "x", 1); //Signal the child that it can proceed with execution after setting up user namespace mappings
 }
+const char * get_state_string(container_state state) {
+    switch (state) {
+        case RUNNING: return "RUNNING";
+        case EXITED: return "EXITED";
+        case KILLED: return "KILLED";
+        case STOPPED: return "STOPPED";
+        default: return "UNKNOWN";
+    }
+}
+
+const char * get_command_string(ipc_command_type cmd) {
+    switch (cmd) {
+        case START: return "START";
+        case RUN: return "RUN";
+        case PS: return "PS";
+        case LOGS: return "LOGS";
+        case STOP: return "STOP";
+        default: return "UNKNOWN";
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * KERNEL IOCTL FUNCTIONS
+ * -------------------------------------------------------------------------- */
+void add_container_to_kernel(container_info * info){
+  int fd;
+  char path[STRUCT_STR_LEN];
+  snprintf(path, sizeof(path), "/dev/%s", DEVICE_NAME);
+  if((fd = open("/dev/" DEVICE_NAME, O_RDWR)) < 0){
+    printf(">Could not locate Kernel Contact for Addition, Proceeding without Syncing with Kernel Memory Monitoring.\n");
+    return;
+  }
+  monitor_request req;
+  req.pid = info->host_pid;
+  req.SOFT_MIB = info->soft_mib;
+  req.HARD_MIB = info->hard_mib;
+  if(ioctl(fd, KERNEL_ADD, &req) < 0){
+    perror("Failed to send ioctl to kernel");
+  }
+  close(fd);
+}
+void remove_container_from_kernel(container_info * info){
+  int fd;
+  char path[STRUCT_STR_LEN];
+  snprintf(path, sizeof(path), "/dev/%s", DEVICE_NAME);
+  if((fd = open("/dev/" DEVICE_NAME, O_RDWR)) < 0){
+    printf(">Could not locate Kernel Contact for Deletion, Proceeding without Syncing with Kernel Memory Monitoring.\n");
+    return;
+  }
+  monitor_request req;
+  req.pid = info->host_pid;
+  req.SOFT_MIB = info->soft_mib;
+  req.HARD_MIB = info->hard_mib;
+  if(ioctl(fd, KERNEL_DELETE, &req) < 0){
+    perror("Failed to send ioctl to kernel");
+  }
+  close(fd);
+}
 
 
 /* --------------------------------------------------------------------------
@@ -261,6 +321,7 @@ void * init_consumer_thread(){
 /* --------------------------------------------------------------------------
  * Supervisor Functions
  * -------------------------------------------------------------------------- */
+
 int check_if_duplicate(char *id){
     pthread_mutex_lock(&containers_list_mutex);
     container_info * info;
@@ -277,9 +338,9 @@ void traverse_hashtable(){
     }
     HASH_ITER(hh, containers_list, curr, tmp) {
       if(curr->stopped == STOPPED)
-        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d|SOFT LIMIT: %ld|HARD LIMIT: %ld|NICE VALUE: %d| STOPPED|\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state, curr->soft_mib, curr->hard_mib, curr->nice_value);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %s|SOFT LIMIT: %ld|HARD LIMIT: %ld|NICE VALUE: %d| STOPPED VIA CLI|\n", curr->id, curr->host_pid, curr->creation_time_str, get_state_string(curr->state), curr->soft_mib, curr->hard_mib, curr->nice_value);
       else
-        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d|SOFT LIMIT: %ld|HARD LIMIT: %ld|NICE VALUE: %d|\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state, curr->soft_mib, curr->hard_mib, curr->nice_value);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %s|SOFT LIMIT: %ld|HARD LIMIT: %ld|NICE VALUE: %d|\n", curr->id, curr->host_pid, curr->creation_time_str, get_state_string(curr->state), curr->soft_mib, curr->hard_mib, curr->nice_value);
     }
     fclose(f);
     pthread_mutex_unlock(&containers_list_mutex);
@@ -482,12 +543,14 @@ void * init_repear(void * arg){
         entry->exit_code = WEXITSTATUS(status);
         entry->state = EXITED;
         printf("[REPEAR]: Container with ID: %s and PID: %d exited with exit code: %d\n", entry->id, exited_pid, entry->exit_code);
+        remove_container_from_kernel(entry);
       
-    }
+      } 
     if(WIFSIGNALED(status)){
       entry->exit_signal = WTERMSIG(status);
       entry->state = KILLED;
       printf("[REPEAR]: Container with ID: %s and PID: %d killed by signal: %d\n", entry->id, exited_pid, entry->exit_signal); 
+      remove_container_from_kernel(entry);
     }
       pthread_mutex_unlock(&containers_list_mutex);
     }
@@ -563,8 +626,7 @@ void init_supervisor(const char *base_rootfs) {
             }
         PANIC("Failed to receive data from socket");
         }
-        printf("%10s>>Received command: %d for container ID: %s\n", "",payload.cmd,
-            payload.id);
+        printf("%10s>>Received command: %s\n", "" ,get_command_string(payload.cmd));
         if(payload.cmd == RUN){
           struct msghdr msg = {0};
           char m_buffer[1] = {0};
@@ -594,7 +656,7 @@ void init_supervisor(const char *base_rootfs) {
         }
         pid_t child_pid;
         pipe(payload.await_fd); //Create a pipe for synchronizing between supervisor and child during startup
-        if(check_if_duplicate(payload.id)){
+        if(check_if_duplicate(payload.id) && payload.cmd != STOP && payload.cmd != LOGS){
             printf("[ERROR]: Container with ID: %s already exists\n", payload.id);
             supervisor_response response = {.type = DUPLICATE_ID, .state = FAILED, .data = "Container ID already exists"};
 
@@ -614,7 +676,8 @@ void init_supervisor(const char *base_rootfs) {
                   supervisor_response response = {.type = NACK, .state = FAILED};
                 fire_response_payload(&response, &client_addr, client_addr_len);
                 break;
-                }
+              }
+                
                 //send success response to client
                 close(producer_arg->producer_read_fd[1]); //Close the write end of the pipe in the producer thread, only the container process will write to it
                 producer_arg->pid = child_pid;
@@ -634,7 +697,7 @@ void init_supervisor(const char *base_rootfs) {
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
                 info->nice_value = payload.nice;
-               
+                add_container_to_kernel(info); //Add container to kernel monitoring via ioctl
                 creation_time_run = localtime(&now_run);
                 snprintf(info->creation_time_str, sizeof(info->creation_time_str), "%02d:%02d:%02d", creation_time_run->tm_hour, creation_time_run->tm_min, creation_time_run->tm_sec);
                 add_container_info(info);
@@ -661,6 +724,7 @@ void init_supervisor(const char *base_rootfs) {
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
                 info->nice_value = payload.nice;
+                add_container_to_kernel(info); //Add container to kernel monitoring via ioctl
 
                 creation_time_run = localtime(&now_run);
                 snprintf(info->creation_time_str, sizeof(info->creation_time_str), "%02d:%02d:%02d", creation_time_run->tm_hour, creation_time_run->tm_min, creation_time_run->tm_sec);

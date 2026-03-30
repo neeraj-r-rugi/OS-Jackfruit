@@ -6,6 +6,12 @@
  * -------------------------------------------------------------------------- */
 
 //Definitions
+//IOCTL Commands
+// #define MAGIC_NUMBER 'M'
+// #define KERNEL_ADD _IOW(MAGIC_NUMBER, 0, monitor_request)
+// #define KERNEL_DELETE _IOW(MAGIC_NUMBER, 1, monitor_request)
+
+#define DEVICE_NAME "container_monitor"
 #define true 1
 #define false 0
 
@@ -137,6 +143,13 @@ typedef struct supervisor_response{
     container_state state; //State of the Container.
     char data[STRUCT_STR_LEN]; //This will be used for sending additional data for certain commands, like PS command response will send the container state, exit code and exit signal in this field.
 }supervisor_response;
+
+// typedef struct monitor_request{
+// 	pid_t pid;
+// 	unsigned long int HARD_MIB;
+// 	unsigned long int SOFT_MIB;
+
+// }monitor_request;
 
 //Global variables
 extern volatile sig_atomic_t stop_signal_emmited;

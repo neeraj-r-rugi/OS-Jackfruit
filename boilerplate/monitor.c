@@ -132,7 +132,7 @@ static void kill_process(const char *container_id,
 /* ---------------------------------------------------------------
  * Timer Callback - fires every CHECK_INTERVAL_SEC seconds.
  * --------------------------------------------------------------- */
-static void timer_callback(struct timer_list *t)
+static void  timer_callback(struct timer_list *t)
 {
     /* ==============================================================
      * TODO 3: Implement periodic monitoring.

@@ -1,6 +1,10 @@
 #ifndef DEFINES_H
 #define DEFINES_H
 
+/* --------------------------------------------------------------------------
+ * User Space 
+ * -------------------------------------------------------------------------- */
+
 //Definitions
 #define true 1
 #define false 0
@@ -149,6 +153,7 @@ extern pthread_mutex_t containers_list_mutex; //Mutex to protect access to the c
 
 //Semaphores
 extern _Atomic int producer_count;
+
 
 
 #endif

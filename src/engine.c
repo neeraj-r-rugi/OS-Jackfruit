@@ -277,9 +277,9 @@ void traverse_hashtable(){
     }
     HASH_ITER(hh, containers_list, curr, tmp) {
       if(curr->stopped == STOPPED)
-        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d | STOPPED|\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d|SOFT LIMIT: %ld|HARD LIMIT: %ld|NICE VALUE: %d| STOPPED|\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state, curr->soft_mib, curr->hard_mib, curr->nice_value);
       else
-        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d |\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state);
+        fprintf(f,"|Container ID: %s | Host PID: %d |TIME STARTED:%s| State: %d|SOFT LIMIT: %ld|HARD LIMIT: %ld|NICE VALUE: %d|\n", curr->id, curr->host_pid, curr->creation_time_str, curr->state, curr->soft_mib, curr->hard_mib, curr->nice_value);
     }
     fclose(f);
     pthread_mutex_unlock(&containers_list_mutex);
@@ -633,6 +633,7 @@ void init_supervisor(const char *base_rootfs) {
                 info->soft_mib = payload.soft_mib;
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
+                info->nice_value = payload.nice;
                
                 creation_time_run = localtime(&now_run);
                 snprintf(info->creation_time_str, sizeof(info->creation_time_str), "%02d:%02d:%02d", creation_time_run->tm_hour, creation_time_run->tm_min, creation_time_run->tm_sec);
@@ -659,6 +660,8 @@ void init_supervisor(const char *base_rootfs) {
                 info->soft_mib = payload.soft_mib;
                 info->hard_mib = payload.hard_mib;
                 info->state = RUNNING;
+                info->nice_value = payload.nice;
+
                 creation_time_run = localtime(&now_run);
                 snprintf(info->creation_time_str, sizeof(info->creation_time_str), "%02d:%02d:%02d", creation_time_run->tm_hour, creation_time_run->tm_min, creation_time_run->tm_sec);
                 add_container_info(info);
